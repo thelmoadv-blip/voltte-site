@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Voltte — a IA opera, você decide</title>
+  <meta name="description" content="Role para atravessar a jornada do Voltte: do chão de fábrica à decisão. ERP AI-first para a indústria brasileira." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* Tema Voltte (manual v2 "A Presença"): grafite + cobre, IBM Plex. */
+    :root, .sw-root {
+      --sw-bg: #1a1d23;            /* == fundo grafite dos stills gerados */
+      --sw-ink: #f3f1ee;
+      --sw-ink-soft: #a9adb6;
+      --sw-accent: #c9742d;        /* cobre primário; seções sobrescrevem */
+      --sw-font-display: 'IBM Plex Sans', system-ui, sans-serif;
+      --sw-font-body: 'IBM Plex Sans', system-ui, sans-serif;
+    }
+    /* Números/provas em Plex Mono (padrão da marca) */
+    .sw-root .sw-tag { font-family: 'IBM Plex Mono', monospace; }
+  </style>
+</head>
+<body>
+  <div id="top"></div>
+  <div id="world"></div>
+
+  <script src="scrub-engine.js"></script>
+  <script>
+    mountScrollWorld(document.getElementById('world'), {
+      brand: { name: 'Voltte', href: '#top' },
+      cta: { label: 'Falar com o Voltte', href: '#contato' },
+      hint: 'role para entrar',
+      diveScroll: 1.3,
+      crossfade: 0.08,             /* arquitetura A: legs encadeados, sem conectores */
+      sections: [
+        {
+          id: 'industria', label: 'A indústria',
+          still: 'assets/scene_1.webp',
+          clip: 'assets/vid/leg_1.mp4',
+          accent: '#e08a3c',
+          eyebrow: 'Feito para a indústria brasileira',
+          title: 'A indústria que não pode parar.',
+          body: 'Linha rodando, pedido saindo, nota emitida. O Voltte nasce aqui dentro — não numa sala de reunião.',
+          tags: ['Indústria brasileira'],
+        },
+        {
+          id: 'legado', label: 'O legado',
+          still: 'assets/scene_2.webp',
+          clip: 'assets/vid/leg_2.mp4',
+          accent: '#a9adb6',
+          eyebrow: 'O problema',
+          title: 'O ERP que ninguém ousa trocar.',
+          body: 'Toda indústria conhece o sistema antigo que segura a operação — e o medo do big-bang que trava a troca.',
+          tags: ['Chega de big-bang'],
+        },
+        {
+          id: 'acoplamento', label: 'O acoplamento',
+          still: 'assets/scene_3.webp',
+          clip: 'assets/vid/leg_3.mp4',
+          accent: '#c9742d',
+          scroll: 1.5, linger: 0.35,
+          eyebrow: 'A estratégia',
+          title: 'Acopla. Prova valor. Assume.',
+          body: 'O Voltte se acopla ao seu legado e assume módulo a módulo. A operação não para um dia sequer.',
+          tags: ['Módulo a módulo', 'Sem parada'],
+        },
+        {
+          id: 'ia-opera', label: 'A IA opera',
+          still: 'assets/scene_4.webp',
+          clip: 'assets/vid/leg_4.mp4',
+          accent: '#e08a3c',
+          scroll: 1.7, linger: 0.45,
+          eyebrow: 'AI-first de verdade',
+          title: 'A IA opera. 24 horas por dia.',
+          body: '8 agentes acompanham financeiro, comercial e fiscal — e propõem cada ação com a prova junto.',
+          tags: ['R$ 1,1 bi+ reconciliados', 'NF-e cStat 100', '1.200+ testes'],
+        },
+        {
+          id: 'voce-decide', label: 'Você decide',
+          still: 'assets/scene_5.webp',
+          clip: 'assets/vid/leg_5.mp4',
+          accent: '#c9742d',
+          scroll: 1.5, linger: 0.4,
+          eyebrow: 'Human-in-the-loop',
+          title: 'A IA propõe. Você aprova.',
+          body: 'Nada acontece sem um humano decidir. A IA prepara, explica e espera o seu OK.',
+          tags: ['Você no comando'],
+        },
+        {
+          id: 'voltte', label: 'Voltte',
+          still: 'assets/scene_6.webp',
+          clip: 'assets/vid/leg_6.mp4',
+          accent: '#e08a3c',
+          scroll: 1.6, linger: 0.4,
+          eyebrow: 'ERP inteligente',
+          title: 'AI-first de verdade.',
+          body: 'IA local e soberana: o dado nunca sai da empresa, e o custo de IA é praticamente zero.',
+          tags: ['LLM local', 'LGPD'],
+          cta: { primary: { label: 'Falar com o Voltte', href: '#contato' },
+                 secondary: { label: 'Ver as provas', href: '/' } },
+        },
+      ],
+      connectors: [],
+    });
+  </script>
+</body>
+</html>
