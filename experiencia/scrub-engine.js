@@ -87,6 +87,7 @@ function mountScrollWorld(container, config) {
   const SEGMENTS = [];
   SECTIONS.forEach((s, i) => {
     const dive = { kind: 'dive', si: i, clip: s.clip, clipM: s.clipMobile, still: s.still, stillM: s.stillMobile,
+                   framesM: s.framesMobile,
                    accent: s.accent, w: s.scroll || DIVE_W, linger: s.linger || 0 };
     SEGMENTS.push(dive);
     s._seg = dive;
@@ -198,7 +199,12 @@ function mountScrollWorld(container, config) {
   function loadClip(s) {
     // Under prefers-reduced-motion we never load the clips at all — the stills stay up
     // and simply cross-dissolve as you scroll. No scrubbed video motion, no decode cost.
-    if (reduce || s.loading || !s.clip) return;
+    if (reduce || s.loading) return;
+    // Phones: draw a pre-decoded image sequence into a canvas instead of scrubbing a
+    // video. Seeking a video is what stutters on mobile (each seek costs a decode and
+    // they pile up on a fast flick); drawing an already-decoded frame is free.
+    if (isMobile() && s.framesM) return loadFrames(s);
+    if (!s.clip) return;
     s.loading = true;
     // Serve the lighter mobile encode on phones when one was provided.
     const url = (isMobile() && s.clipM) ? s.clipM : s.clip;
@@ -217,6 +223,37 @@ function mountScrollWorld(container, config) {
         v.addEventListener('loadeddata', () => { try { v.pause(); } catch (e) {} if (userReady) primeVideo(v); });
         s.el.appendChild(v); s.video = v; s.hasClip = true;
       }).catch(() => { s.loading = false; });
+  }
+
+  // Image-sequence path (phones). config: framesMobile { dir, count, ext }.
+  // Frames are named 000.<ext>, 001.<ext>, … inside `dir`. The first frame to arrive
+  // paints immediately and reveals the scene; the rest fill in behind it, so a slow
+  // connection degrades to a coarser flipbook instead of a frozen clip.
+  function loadFrames(s) {
+    s.loading = true;
+    const F = s.framesM, n = F.count | 0, ext = F.ext || 'webp';
+    if (!n) return;
+    const cv = document.createElement('canvas');
+    cv.className = 'sw-scene__video';
+    const ctx = cv.getContext('2d', { alpha: false });
+    const imgs = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const im = new Image();
+      im.decoding = 'async';
+      if (i === 0) {
+        im.onload = () => {
+          cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+          ctx.drawImage(im, 0, 0);
+          s.el.appendChild(cv);
+          s.canvas = cv; s.ctx = ctx; s.frames = imgs; s.lastIdx = 0;
+          s.hasClip = true; s.ready = true;
+          s.el.classList.add('has-clip');
+          read();
+        };
+      }
+      im.src = `${F.dir}/${String(i).padStart(3, '0')}.${ext}`;
+      imgs[i] = im;
+    }
   }
 
   function read() {
@@ -274,6 +311,23 @@ function mountScrollWorld(container, config) {
     const eps = isMobile() ? 0.02 : 0.008;   // coarser seek step on phones = fewer decodes
     for (let i = 0; i < NSEG; i++) {
       const s = SEGMENTS[i];
+      // Image sequence (phones): pick the frame for the current progress and blit it.
+      // No decoder, no seek queue — a frame that hasn't downloaded yet is simply skipped
+      // (the previous one stays up) instead of stalling the scroll.
+      if (s.frames) {
+        if (!s.visible && Math.abs(s.cur - s.target) < 0.002) continue;
+        s.cur += (s.target - s.cur) * (reduce ? 1 : 0.18);
+        const n = s.frames.length;
+        const idx = Math.round(clamp(s.cur, 0, 1) * (n - 1));
+        if (idx !== s.lastIdx) {
+          const im = s.frames[idx];
+          if (im && im.complete && im.naturalWidth) {
+            s.ctx.drawImage(im, 0, 0, s.canvas.width, s.canvas.height);
+            s.lastIdx = idx;
+          }
+        }
+        continue;
+      }
       if (!s.hasClip || !s.ready || !s.video) continue;
       // Never queue a seek while the decoder is still resolving the last one.
       // On phones a fast flick would otherwise pile up seeks and freeze the clip;
