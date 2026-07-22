@@ -8,6 +8,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <!-- Celular: 3 quadros da 1ª cena já no boot (começo, meio, fim) para ela abrir
+       em movimento em vez de parada. `media` evita o custo no desktop, que usa vídeo. -->
+  <link rel="preload" as="image" href="assets/frames/leg_1/000.webp" media="(max-width: 860px)" />
+  <link rel="preload" as="image" href="assets/frames/leg_1/020.webp" media="(max-width: 860px)" />
+  <link rel="preload" as="image" href="assets/frames/leg_1/039.webp" media="(max-width: 860px)" />
   <style>
     /* Tema Voltte (manual v2 "A Presença"): grafite + cobre, IBM Plex. */
     :root, .sw-root {

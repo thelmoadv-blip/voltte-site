@@ -188,6 +188,7 @@ function mountScrollWorld(container, config) {
     SEGMENTS.forEach(s => { s.start = off * vh; off += s.w; s.end = off * vh; });
     totalW = off;
     track.style.height = (totalW * vh + vh) + 'px';   // +1vh so the last flight completes
+    SEGMENTS.forEach(s => { if (s.canvas) sizeCanvas(s); });   // rotation changes width too
     read();
   }
 
@@ -200,10 +201,10 @@ function mountScrollWorld(container, config) {
     // Under prefers-reduced-motion we never load the clips at all — the stills stay up
     // and simply cross-dissolve as you scroll. No scrubbed video motion, no decode cost.
     if (reduce || s.loading) return;
-    // Phones: draw a pre-decoded image sequence into a canvas instead of scrubbing a
-    // video. Seeking a video is what stutters on mobile (each seek costs a decode and
-    // they pile up on a fast flick); drawing an already-decoded frame is free.
-    if (isMobile() && s.framesM) return loadFrames(s);
+    // Phones: the image-sequence path replaces the video entirely (see manageFrames).
+    // It is driven from read() — loading, releasing and drawing all depend on where the
+    // scroll is, so it can't be a fire-and-forget call like a video load.
+    if (usesFrames(s)) return;
     if (!s.clip) return;
     s.loading = true;
     // Serve the lighter mobile encode on phones when one was provided.
@@ -225,35 +226,205 @@ function mountScrollWorld(container, config) {
       }).catch(() => { s.loading = false; });
   }
 
-  // Image-sequence path (phones). config: framesMobile { dir, count, ext }.
-  // Frames are named 000.<ext>, 001.<ext>, … inside `dir`. The first frame to arrive
-  // paints immediately and reveals the scene; the rest fill in behind it, so a slow
-  // connection degrades to a coarser flipbook instead of a frozen clip.
-  function loadFrames(s) {
-    s.loading = true;
+  /* ------------------------------------------------------------------------
+     IMAGE-SEQUENCE PATH (phones). config: framesMobile { dir, count, ext };
+     frames are named 000.<ext>, 001.<ext>, … inside `dir`.
+
+     Everything that hurts here is memory and latency, not CPU:
+
+     1. MEMORY. A decoded frame costs width*height*4 bytes regardless of how small
+        the .webp is — 720x406 is ~1.2 MB. Holding every frame of every scene
+        (6 x 40) would be ~280 MB of live bitmaps and iOS kills the tab long
+        before that. So frames live inside a budget: scenes far from the scroll
+        are released whole, and inside a scene the frames furthest from the
+        current one are dropped first (they re-fetch from cache on the way back).
+     2. LATENCY. Firing 40 requests at once buries the one frame that actually
+        reveals the scene. Requests are queued, capped, and ordered by binary
+        subdivision (0, last, middle, quarters…) so the whole scene is scrubbable
+        early instead of only its first second.
+     3. NEVER FREEZE. If the exact frame for the current progress hasn't arrived,
+        we draw the nearest one that has. The flipbook gets coarser on a bad
+        connection; it never stops following the finger.
+
+     The canvas is sized to the viewport and does the cover-crop itself in
+     drawImage, so it doesn't depend on `object-fit` applying to <canvas> (which
+     WebKit has historically not honoured) — the framing matches the poster and
+     the desktop video by construction.
+     ---------------------------------------------------------------------- */
+  const CANVAS_OK = (() => {
+    try { return !!document.createElement('canvas').getContext('2d'); } catch (e) { return false; }
+  })();
+  const FRAME_BUDGET = 60;    // decoded frames held at once (~70 MB at 720x406)
+  const FRAME_INFLIGHT = 5;   // concurrent frame requests
+  const LOAD_DIST = 0.7;      // start a scene's frames this many viewports out…
+  const FREE_DIST = 1.8;      // …and drop them again out here (hysteresis)
+  const FOCUS_Y = 0.44;       // == object-position: center 44% in the CSS
+  let inflight = 0, canvasVH = 0;
+
+  const usesFrames = s => !reduce && CANVAS_OK && isMobile() && !!s.framesM;
+
+  // 0, n-1, n/2, quarters, eighths… every prefix of this order spreads evenly over
+  // the scene, so an interrupted download still scrubs end to end.
+  function subdivOrder(n) {
+    const seen = new Set(), out = [];
+    const push = i => { if (i >= 0 && i < n && !seen.has(i)) { seen.add(i); out.push(i); } };
+    push(0); push(n - 1);
+    for (let step = (n - 1) / 2; step >= 1; step /= 2)
+      for (let x = step; x < n - 1; x += step) push(Math.round(x));
+    for (let i = 0; i < n; i++) push(i);
+    return out;
+  }
+
+  function initFrames(s) {
+    if (s.frames) return;
     const F = s.framesM, n = F.count | 0, ext = F.ext || 'webp';
     if (!n) return;
-    const cv = document.createElement('canvas');
-    cv.className = 'sw-scene__video';
-    const ctx = cv.getContext('2d', { alpha: false });
-    const imgs = new Array(n);
-    for (let i = 0; i < n; i++) {
+    s.frames = new Array(n).fill(null);
+    s.pending = new Array(n).fill(false);
+    s.failed = new Array(n).fill(false);   // a missing file is skipped for good, not retried forever
+    s.nF = n;
+    s.order = subdivOrder(n);
+    s.frameUrl = i => `${F.dir}/${String(i).padStart(3, '0')}.${ext}`;
+    s.loading = true;
+    const cv = el('canvas', 'sw-scene__canvas');
+    s.canvas = cv; s.ctx = cv.getContext('2d', { alpha: false });
+    sizeCanvas(s);
+    s.el.appendChild(cv);
+  }
+
+  function sizeCanvas(s) {
+    if (!s.canvas) return;
+    // The source frames are 720px wide and get blown up ~4x by the portrait crop,
+    // so there is no detail above ~1.5x CSS pixels — capping DPR here is free
+    // quality-wise and cuts both the bitmap and the per-frame blit cost.
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const w = Math.max(1, Math.round(window.innerWidth * dpr));
+    const h = Math.max(1, Math.round(window.innerHeight * dpr));
+    if (s.canvas.width !== w || s.canvas.height !== h) {
+      s.canvas.width = w; s.canvas.height = h;   // also clears it
+      s.drawn = null;                            // force a redraw
+    }
+  }
+
+  function releaseFrames(s) {
+    if (!s.frames) return;
+    for (let i = 0; i < s.frames.length; i++) dropFrame(s, i);
+    s.frames = null; s.pending = null; s.failed = null; s.order = null;
+    if (s.canvas) { s.canvas.width = s.canvas.height = 1; s.canvas.remove(); }
+    s.canvas = null; s.ctx = null; s.drawn = null;
+    s.hasClip = false; s.ready = false; s.loading = false;
+    s.el.classList.remove('has-clip');
+  }
+
+  function dropFrame(s, i) {
+    const im = s.frames[i];
+    if (!im) return;
+    im.onload = im.onerror = null;
+    im.src = '';                 // lets the decoder release the bitmap now
+    s.frames[i] = null;
+  }
+
+  // Called from read() on every scroll tick: decides which scenes hold frames,
+  // keeps the total under budget, and keeps the request queue fed.
+  function manageFrames() {
+    const live = [];
+    for (let i = 0; i < NSEG; i++) {
+      const s = SEGMENTS[i];
+      // A resize past 860px (DevTools, a desktop window) flips this off mid-session:
+      // hand the scene back to the video path instead of leaving a canvas on top of it.
+      if (!usesFrames(s)) { if (s.frames) releaseFrames(s); continue; }
+      if (s.dist <= LOAD_DIST * vh) initFrames(s);
+      else if (s.frames && s.dist > FREE_DIST * vh) releaseFrames(s);
+      if (s.frames) live.push(s);
+    }
+    if (!live.length) return;
+    live.sort((a, b) => a.dist - b.dist);
+    trimFrames(live);
+    pump(live);
+  }
+
+  function trimFrames(live) {
+    let total = 0;
+    for (const s of live) for (const im of s.frames) if (im) total++;
+    if (total <= FRAME_BUDGET) return;
+    // Furthest scene first, and inside it the frames furthest from where the
+    // scrub currently sits. Never drop the frame that is on screen.
+    for (let k = live.length - 1; k >= 0 && total > FRAME_BUDGET; k--) {
+      const s = live[k];
+      const cur = Math.round(clamp(s.cur, 0, 1) * (s.nF - 1));
+      const held = [];
+      for (let i = 0; i < s.nF; i++) if (s.frames[i]) held.push(i);
+      held.sort((a, b) => Math.abs(b - cur) - Math.abs(a - cur));
+      for (const i of held) {
+        if (total <= FRAME_BUDGET) break;
+        if (s.frames[i] === s.drawn) continue;
+        dropFrame(s, i); total--;
+      }
+    }
+  }
+
+  function pump(live) {
+    while (inflight < FRAME_INFLIGHT) {
+      let picked = null, pi = -1;
+      for (const s of live) {                 // nearest scene wins the slot
+        pi = nextWanted(s);
+        if (pi >= 0) { picked = s; break; }
+      }
+      if (!picked) return;
+      const s = picked, i = pi;
+      s.pending[i] = true; inflight++;
       const im = new Image();
       im.decoding = 'async';
-      if (i === 0) {
-        im.onload = () => {
-          cv.width = im.naturalWidth; cv.height = im.naturalHeight;
-          ctx.drawImage(im, 0, 0);
-          s.el.appendChild(cv);
-          s.canvas = cv; s.ctx = ctx; s.frames = imgs; s.lastIdx = 0;
-          s.hasClip = true; s.ready = true;
-          s.el.classList.add('has-clip');
-          read();
-        };
-      }
-      im.src = `${F.dir}/${String(i).padStart(3, '0')}.${ext}`;
-      imgs[i] = im;
+      const settle = () => { inflight--; if (s.pending) s.pending[i] = false; };
+      im.onload = () => {
+        settle();
+        if (!s.frames) return;                // scene was released mid-flight
+        s.frames[i] = im;
+        s.ready = true; s.hasClip = true;
+        schedRead();
+      };
+      im.onerror = () => { settle(); if (s.failed) s.failed[i] = true; };
+      im.src = s.frameUrl(i);
     }
+  }
+
+  // Next frame worth fetching for this scene: the first hole in subdivision order,
+  // biased to the frames around where the scrub actually is.
+  function nextWanted(s) {
+    if (!s.frames) return -1;
+    const want = i => i >= 0 && i < s.nF && !s.frames[i] && !s.pending[i] && !s.failed[i];
+    const cur = Math.round(clamp(s.cur, 0, 1) * (s.nF - 1));
+    for (let d = 0; d <= 2; d++)               // what the finger is about to need
+      for (const i of [cur - d, cur + d]) if (want(i)) return i;
+    for (const i of s.order) if (want(i)) return i;
+    return -1;
+  }
+
+  // Cover-crop by hand (no reliance on object-fit for <canvas>), matching the
+  // CSS `object-position: center 44%` the poster and the desktop video use.
+  function drawFrame(s, idx) {
+    const im = nearestReady(s, idx);
+    if (!im || im === s.drawn) return;
+    const cw = s.canvas.width, ch = s.canvas.height;
+    const iw = im.naturalWidth, ih = im.naturalHeight;
+    if (!iw || !ih || !cw || !ch) return;
+    const sc = Math.max(cw / iw, ch / ih);
+    const dw = iw * sc, dh = ih * sc;
+    s.ctx.drawImage(im, (cw - dw) * 0.5, (ch - dh) * FOCUS_Y, dw, dh);
+    s.drawn = im;
+    if (!s.el.classList.contains('has-clip')) s.el.classList.add('has-clip');
+  }
+
+  function nearestReady(s, idx) {
+    const f = s.frames;
+    if (!f) return null;
+    const ok = im => im && im.complete && im.naturalWidth;
+    if (ok(f[idx])) return f[idx];
+    for (let d = 1; d < s.nF; d++) {
+      if (ok(f[idx - d])) return f[idx - d];
+      if (ok(f[idx + d])) return f[idx + d];
+    }
+    return null;
   }
 
   function read() {
@@ -262,13 +433,21 @@ function mountScrollWorld(container, config) {
     let ci = 0;
     for (let i = 0; i < NSEG; i++) if (y >= SEGMENTS[i].start) ci = i;
 
+    // The URL bar sliding away changes innerHeight without a layout (see onResize);
+    // the canvases still have to follow it or the cover-crop stretches.
+    if (window.innerHeight !== canvasVH) {
+      canvasVH = window.innerHeight;
+      for (let i = 0; i < NSEG; i++) if (SEGMENTS[i].canvas) sizeCanvas(SEGMENTS[i]);
+    }
+
     for (let i = 0; i < NSEG; i++) {
       const s = SEGMENTS[i];
-      if (y > s.start - 1.6 * vh && y < s.end + 1.6 * vh) loadClip(s);
       const local = clamp((y - s.start) / (s.end - s.start), 0, 1);
       s.target = s.linger ? lingerEase(local, s.linger) : local;
       let outside = 0;
       if (y < s.start) outside = s.start - y; else if (y > s.end) outside = y - s.end;
+      s.dist = outside;
+      if (!usesFrames(s) && outside < 1.6 * vh) loadClip(s);
       const op = smooth(1 - outside / fade);
       s.el.style.opacity = op; s.visible = op > 0.001;
       s.el.style.zIndex = (i === ci) ? '120' : String(100 + Math.round(op * 10));
@@ -304,28 +483,23 @@ function mountScrollWorld(container, config) {
     scrollbarFill.style.transform = `scaleX(${clamp(y / (totalW * vh))})`;
     hint.style.opacity = clamp(1 - y / (0.5 * vh));
     if (particles) particles.style.transform = `translate3d(0, ${-y * 0.05}px, 0)`;
+    manageFrames();
     ticking = false;
   }
+
+  function schedRead() { if (!ticking) { ticking = true; requestAnimationFrame(read); } }
 
   function raf() {
     const eps = isMobile() ? 0.02 : 0.008;   // coarser seek step on phones = fewer decodes
     for (let i = 0; i < NSEG; i++) {
       const s = SEGMENTS[i];
       // Image sequence (phones): pick the frame for the current progress and blit it.
-      // No decoder, no seek queue — a frame that hasn't downloaded yet is simply skipped
-      // (the previous one stays up) instead of stalling the scroll.
-      if (s.frames) {
+      // No decoder, no seek queue. If that exact frame isn't in yet, drawFrame falls
+      // back to the nearest one that is — coarser, never frozen.
+      if (s.canvas) {
         if (!s.visible && Math.abs(s.cur - s.target) < 0.002) continue;
         s.cur += (s.target - s.cur) * (reduce ? 1 : 0.18);
-        const n = s.frames.length;
-        const idx = Math.round(clamp(s.cur, 0, 1) * (n - 1));
-        if (idx !== s.lastIdx) {
-          const im = s.frames[idx];
-          if (im && im.complete && im.naturalWidth) {
-            s.ctx.drawImage(im, 0, 0, s.canvas.width, s.canvas.height);
-            s.lastIdx = idx;
-          }
-        }
+        drawFrame(s, Math.round(clamp(s.cur, 0, 1) * (s.nF - 1)));
         continue;
       }
       if (!s.hasClip || !s.ready || !s.video) continue;
@@ -360,9 +534,19 @@ function mountScrollWorld(container, config) {
   window.addEventListener('pointerdown', onFirstGesture, { once: true, passive: true });
   window.addEventListener('touchstart', onFirstGesture, { once: true, passive: true });
 
+  // Coming back from another tab/app, iOS may have thrown away the canvas backing
+  // store — the scene would sit blank until the scroll happened to want a different
+  // frame. Forget what we think is drawn so the next tick repaints it.
+  function repaintAll() {
+    for (let i = 0; i < NSEG; i++) if (SEGMENTS[i].canvas) SEGMENTS[i].drawn = null;
+    schedRead();
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) repaintAll(); });
+  window.addEventListener('pageshow', repaintAll);
+
   // Particles are a per-frame cost we can't afford alongside video scrubbing on a phone.
   seedParticles(particles, reduce || coarse);
-  window.addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(read); } }, { passive: true });
+  window.addEventListener('scroll', schedRead, { passive: true });
   // Mobile browsers fire `resize` every time the URL bar slides in/out. Re-running
   // layout() there rebuilds the track height and yanks the scroll position, so on
   // touch we ignore height-only changes and only relayout when the width actually
@@ -438,6 +622,12 @@ function injectCSS() {
   .sw-scene{position:absolute;inset:0;opacity:0;overflow:hidden;will-change:opacity;}
   .sw-scene__video,.sw-scene__still{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 42%;}
   .sw-scene__still{will-change:transform;} .sw-scene.has-clip .sw-scene__still{opacity:0;} .sw-scene__video{z-index:1;}
+  /* Phone image-sequence canvas. No object-fit here on purpose: the bitmap is the
+     size of the viewport and drawFrame() does the cover-crop, so the framing can't
+     depend on a property WebKit may not apply to <canvas>. Hidden until the first
+     real frame is painted, so it never covers the poster with an empty rectangle. */
+  .sw-scene__canvas{position:absolute;inset:0;width:100%;height:100%;z-index:1;opacity:0;}
+  .sw-scene.has-clip .sw-scene__canvas{opacity:1;}
   .sw-copylayer{position:fixed;inset:0;z-index:20;pointer-events:none;}
   .sw-copylayer::before{content:"";position:absolute;inset:0;width:min(58vw,780px);background:linear-gradient(90deg,var(--sw-bg) 0%,color-mix(in srgb,var(--sw-bg) 82%,transparent) 34%,color-mix(in srgb,var(--sw-bg) 40%,transparent) 62%,transparent 100%);}
   .sw-copy{position:absolute;left:clamp(18px,5vw,64px);top:50%;transform:translateY(-50%);width:min(42vw,460px);opacity:0;will-change:opacity,transform;}
